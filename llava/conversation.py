@@ -236,12 +236,14 @@ conv_llava_v1 = Conversation(
     sep2="</s>",
 )
 
+# llava/conversation.py에서 수정
 conv_scaffold_safety = Conversation(
     system="You are a professional scaffold safety inspector AI. "
            "Analyze the 3D point cloud of scaffold structures for safety compliance. "
            "Focus on structural integrity, working platform safety, and height safety measures. "
-           "Provide detailed safety assessments with specific recommendations.",
-    roles=("INSPECTOR", "ASSISTANT"),
+           "Provide detailed safety assessments with specific recommendations in English only. "
+           "CRITICAL: Always respond in English regardless of input language.",
+    roles=("INSPECTOR", "SAFETY_AI"),
     version="scaffold_v1",
     messages=(),
     offset=0,

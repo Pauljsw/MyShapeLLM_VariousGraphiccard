@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-llava/serve/scaffold_cli.py
+llava/serve/data_driven_scaffold_cli.py
 
-Final fixed version with dtype consistency and proper error handling
+Fixed version with proper imports and inheritance
 """
 
 import torch
@@ -22,19 +22,33 @@ from llava.conversation import conv_templates, SeparatorStyle
 from llava.constants import POINT_TOKEN_INDEX, DEFAULT_POINT_TOKEN, DEFAULT_PT_START_TOKEN, DEFAULT_PT_END_TOKEN
 from llava.mm_utils import load_pts, process_pts, rotation, tokenizer_point_token, get_model_name_from_path, KeywordsStoppingCriteria
 
+# Add parent directory to path for imports
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Import structure analyzer
+try:
+    from scaffold_structure_analyzer import ScaffoldStructureAnalyzer, format_analysis_for_llm
+    STRUCTURE_ANALYZER_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Structure analyzer not available: {e}")
+    STRUCTURE_ANALYZER_AVAILABLE = False
+
 # ScaffoldPointLoRA imports
 try:
     from ScaffoldPointLoRA import ScaffoldPointLoRA
     from integrate_scaffold_pointlora import ScaffoldDataProcessor
     SCAFFOLD_LORA_AVAILABLE = True
-except ImportError:
-    print("⚠️ ScaffoldPointLoRA not available, using base ShapeLLM")
+except ImportError as e:
+    print(f"⚠️ ScaffoldPointLoRA not available: {e}")
     SCAFFOLD_LORA_AVAILABLE = False
 
 
-class ScaffoldSafetyCLI:
+class DataDrivenScaffoldCLI:
     """
-    Final fixed ScaffoldPointLoRA integrated ShapeLLM CLI
+    Data-driven ScaffoldPointLoRA integrated ShapeLLM CLI
+    Based on the working cli.py but with enhanced structural analysis
     """
     
     def __init__(self, args):
@@ -45,6 +59,8 @@ class ScaffoldSafetyCLI:
         self.conv = None
         self.scaffold_lora = None
         self.data_processor = ScaffoldDataProcessor() if SCAFFOLD_LORA_AVAILABLE else None
+        self.structure_analyzer = ScaffoldStructureAnalyzer() if STRUCTURE_ANALYZER_AVAILABLE else None
+        self.current_analysis = None
         
         # English safety prompts
         self.safety_prompts = {
@@ -54,10 +70,12 @@ class ScaffoldSafetyCLI:
             'height': "Assess height safety measures. Check vertical/horizontal spacing and access methods."
         }
         
-        print(f"✅ ScaffoldSafetyCLI initialized")
+        print(f"✅ DataDrivenScaffoldCLI initialized")
+        print(f"📊 Structure analyzer: {'Available' if STRUCTURE_ANALYZER_AVAILABLE else 'Not available'}")
+        print(f"🎯 ScaffoldPointLoRA: {'Available' if SCAFFOLD_LORA_AVAILABLE else 'Not available'}")
     
     def load_model(self):
-        """Load ShapeLLM model with fixed ScaffoldPointLoRA"""
+        """Load ShapeLLM model with enhanced analysis"""
         print("📦 Loading ShapeLLM model...")
         
         # Model loading - exactly like cli.py
@@ -88,14 +106,14 @@ class ScaffoldSafetyCLI:
         self.conv = conv_templates[conv_mode].copy()
         print(f"✅ Conversation mode: {conv_mode}")
         
-        # Apply fixed ScaffoldPointLoRA
+        # Apply ScaffoldPointLoRA if available
         if self.args.use_scaffold_lora and SCAFFOLD_LORA_AVAILABLE:
             self._apply_scaffold_lora()
         
         print("✅ Model loading complete")
     
     def _apply_scaffold_lora(self):
-        """Apply fixed ScaffoldPointLoRA with proper dtype handling"""
+        """Apply ScaffoldPointLoRA with enhanced analysis"""
         try:
             print("🔧 Applying ScaffoldPointLoRA...")
             
@@ -110,7 +128,7 @@ class ScaffoldSafetyCLI:
                     model_device = next(self.model.parameters()).device
                     model_dtype = next(self.model.parameters()).dtype
                     
-                    # Initialize ScaffoldPointLoRA with proper dtype
+                    # Initialize ScaffoldPointLoRA
                     self.scaffold_lora = ScaffoldPointLoRA(
                         hidden_size=hidden_size,
                         lora_rank=self.args.scaffold_lora_rank,
@@ -118,12 +136,12 @@ class ScaffoldSafetyCLI:
                         num_selected_tokens=40
                     )
                     
-                    # Move to model device with proper dtype
+                    # Move to model device
                     self.scaffold_lora = self.scaffold_lora.to(device=model_device, dtype=model_dtype)
                     
                     print(f"📍 ScaffoldPointLoRA device: {model_device}, dtype: {model_dtype}")
                     
-                    # Wrap vision tower with fixed dtype handling
+                    # Wrap vision tower
                     self._wrap_vision_tower_with_lora(vision_tower)
                     
                     # Freeze parameters if needed
@@ -144,21 +162,50 @@ class ScaffoldSafetyCLI:
             print("Continuing with base ShapeLLM...")
     
     def _wrap_vision_tower_with_lora(self, vision_tower):
-        """Wrap vision tower with fixed dtype handling"""
+        """Enhanced vision tower wrapper with data analysis"""
         original_forward = vision_tower.forward
         
-        def fixed_lora_forward(pts):
+        def data_driven_lora_forward(pts):
             # Execute original forward
             original_output = original_forward(pts)
             
-            # Apply ScaffoldPointLoRA with proper dtype handling
+            # Extract point cloud data for analysis
+            point_data = None
+            if isinstance(pts, list) and len(pts) > 0:
+                point_data = pts[0].cpu().numpy()
+            elif isinstance(pts, torch.Tensor):
+                point_data = pts.cpu().numpy()
+                if point_data.ndim == 3:
+                    point_data = point_data[0]  # Remove batch dimension
+            
+            # Perform structural analysis
+            if point_data is not None and point_data.shape[1] >= 3 and STRUCTURE_ANALYZER_AVAILABLE:
+                try:
+                    # Use only XYZ coordinates for analysis
+                    xyz_coords = point_data[:, :3]
+                    
+                    # Perform detailed structural analysis
+                    print("🔍 Performing structural analysis...")
+                    self.current_analysis = self.structure_analyzer.analyze_scaffold_structure(xyz_coords)
+                    
+                    print(f"📊 Analysis completed:")
+                    print(f"   - Components: {len(self.current_analysis['structural_components']['platforms'])} platforms, "
+                          f"{len(self.current_analysis['structural_components']['supports'])} supports")
+                    print(f"   - Safety grade: {self.current_analysis['safety_assessment']['overall_grade']}")
+                    print(f"   - Issues found: {len(self.current_analysis['specific_issues'])}")
+                    
+                except Exception as e:
+                    print(f"⚠️ Structural analysis error: {e}")
+                    self.current_analysis = None
+            
+            # Apply ScaffoldPointLoRA if available
             if self.scaffold_lora is not None:
                 try:
                     # Get consistent dtype and device from model
                     model_device = next(self.model.parameters()).device
                     model_dtype = next(self.model.parameters()).dtype
                     
-                    # Extract coordinates with proper dtype conversion
+                    # Extract coordinates
                     coords = None
                     if isinstance(pts, list) and len(pts) > 0:
                         coords = pts[0][:, :3].unsqueeze(0)
@@ -169,7 +216,7 @@ class ScaffoldSafetyCLI:
                         # Ensure coords has correct dtype and device
                         coords = coords.to(device=model_device, dtype=model_dtype)
                         
-                        # Generate dummy features with consistent dtype
+                        # Generate dummy features
                         batch_size, num_points = coords.shape[:2]
                         dummy_features = torch.randn(
                             batch_size, num_points, self.scaffold_lora.hidden_size,
@@ -180,7 +227,7 @@ class ScaffoldSafetyCLI:
                         if next(self.scaffold_lora.parameters()).dtype != model_dtype:
                             self.scaffold_lora = self.scaffold_lora.to(device=model_device, dtype=model_dtype)
                         
-                        # Multi-scale token selection with fixed dtype
+                        # Multi-scale token selection
                         selection_result = self.scaffold_lora(
                             dummy_features, coords, mode='token_selection'
                         )
@@ -192,17 +239,11 @@ class ScaffoldSafetyCLI:
                         
                 except Exception as e:
                     print(f"⚠️ LoRA forward error (using original output): {e}")
-                    # Additional debugging info
-                    if hasattr(self, 'scaffold_lora') and self.scaffold_lora is not None:
-                        print(f"   scaffold_lora device: {next(self.scaffold_lora.parameters()).device}")
-                        print(f"   scaffold_lora dtype: {next(self.scaffold_lora.parameters()).dtype}")
-                    if 'coords' in locals():
-                        print(f"   coords device: {coords.device}, dtype: {coords.dtype}")
             
             return original_output
         
         # Replace forward function
-        vision_tower.forward = fixed_lora_forward
+        vision_tower.forward = data_driven_lora_forward
     
     def _freeze_non_lora_parameters(self):
         """Freeze non-LoRA parameters"""
@@ -230,9 +271,143 @@ class ScaffoldSafetyCLI:
             print(f"Memory savings: {1-(trainable_params/total_params):.2%}")
             print("=" * 50)
     
+    def _format_data_driven_response(self, prompt: str, basic_response: str) -> str:
+        """Format a data-driven response with specific details"""
+        
+        if self.current_analysis is None:
+            return basic_response
+        
+        analysis = self.current_analysis
+        
+        # Extract key information
+        platforms = analysis['structural_components']['platforms']
+        supports = analysis['structural_components']['supports']
+        safety_grade = analysis['safety_assessment']['overall_grade']
+        issues = analysis['specific_issues']
+        recommendations = analysis['recommendations']
+        
+        # Check what type of analysis was requested
+        if 'structural' in prompt.lower() or 'framework' in prompt.lower():
+            return self._format_structural_response(platforms, supports, safety_grade, issues)
+        elif 'platform' in prompt.lower():
+            return self._format_platform_response(platforms, issues)
+        elif 'safety' in prompt.lower() or 'check' in prompt.lower():
+            return self._format_safety_response(safety_grade, issues, recommendations)
+        else:
+            return self._format_comprehensive_response(analysis)
+    
+    def _format_structural_response(self, platforms, supports, safety_grade, issues):
+        """Format structural analysis response"""
+        response = f"**Structural Analysis Results (Grade: {safety_grade}):**\n\n"
+        
+        # Platform details
+        if platforms:
+            response += f"**Platforms Detected:** {len(platforms)} levels\n"
+            for i, platform in enumerate(platforms):
+                center = platform['center']
+                response += f"- Platform {i+1}: Located at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}m), Area: {platform['area']:.1f}m²\n"
+        
+        # Support details
+        if supports:
+            response += f"\n**Support Structure:** {len(supports)} vertical supports identified\n"
+            for i, support in enumerate(supports):
+                center = support['center']
+                response += f"- Support {i+1}: Position ({center[0]:.2f}, {center[1]:.2f}), Height: {support['length']:.1f}m\n"
+        
+        # Specific issues
+        if issues:
+            response += f"\n**Structural Issues Found:**\n"
+            for issue in issues:
+                loc = issue['location']
+                response += f"- {issue['type']}: At coordinates ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m)\n"
+                response += f"  → {issue['description']}\n"
+        else:
+            response += "\n**No structural issues detected.**"
+        
+        return response
+    
+    def _format_platform_response(self, platforms, issues):
+        """Format platform-specific response"""
+        response = f"**Platform Safety Analysis:**\n\n"
+        
+        if platforms:
+            response += f"**{len(platforms)} working platforms detected:**\n"
+            for i, platform in enumerate(platforms):
+                center = platform['center']
+                bbox = platform['bbox']
+                response += f"\n**Platform {i+1}:**\n"
+                response += f"- Location: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}m)\n"
+                response += f"- Dimensions: {bbox[1]-bbox[0]:.1f}m × {bbox[3]-bbox[2]:.1f}m\n"
+                response += f"- Working area: {platform['area']:.1f}m²\n"
+        
+        # Platform-specific issues
+        platform_issues = [issue for issue in issues if 'platform' in issue['type'].lower()]
+        if platform_issues:
+            response += f"\n**Platform Issues:**\n"
+            for issue in platform_issues:
+                loc = issue['location']
+                response += f"- Issue at ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m): {issue['description']}\n"
+        
+        return response
+    
+    def _format_safety_response(self, safety_grade, issues, recommendations):
+        """Format comprehensive safety response"""
+        response = f"**Safety Assessment (Grade: {safety_grade}):**\n\n"
+        
+        if issues:
+            response += f"**{len(issues)} safety issues identified:**\n"
+            for i, issue in enumerate(issues, 1):
+                loc = issue['location']
+                response += f"\n{i}. **{issue['type']}** (Severity: {issue['severity']})\n"
+                response += f"   - Location: ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m)\n"
+                response += f"   - Description: {issue['description']}\n"
+        
+        if recommendations:
+            response += f"\n**Immediate Actions Required:**\n"
+            for i, rec in enumerate(recommendations, 1):
+                loc = rec['location']
+                response += f"\n{i}. {rec['action']} (Priority: {rec['priority']})\n"
+                response += f"   - Location: ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m)\n"
+                response += f"   - Action: {rec['description']}\n"
+                response += f"   - Timeline: {rec['timeline']}\n"
+        
+        if not issues:
+            response += "**No safety issues detected. Structure meets safety standards.**"
+        
+        return response
+    
+    def _format_comprehensive_response(self, analysis):
+        """Format comprehensive analysis response"""
+        response = f"**Comprehensive Scaffold Analysis:**\n\n"
+        
+        # Summary
+        components = analysis['structural_components']
+        safety = analysis['safety_assessment']
+        
+        response += f"**Structure Summary:**\n"
+        response += f"- Safety Grade: {safety['overall_grade']} ({safety['safety_status']})\n"
+        response += f"- Components: {len(components['platforms'])} platforms, {len(components['supports'])} supports\n"
+        response += f"- Compliance Rate: {safety['compliance_rate']:.1f}%\n"
+        
+        # Key findings
+        if analysis['specific_issues']:
+            response += f"\n**Key Findings:**\n"
+            for issue in analysis['specific_issues'][:3]:  # Show top 3 issues
+                loc = issue['location']
+                response += f"- {issue['type']} at ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m)\n"
+        
+        # Recommendations
+        if analysis['recommendations']:
+            response += f"\n**Priority Actions:**\n"
+            for rec in analysis['recommendations'][:2]:  # Show top 2 recommendations
+                loc = rec['location']
+                response += f"- {rec['action']} at ({loc[0]:.2f}, {loc[1]:.2f}, {loc[2]:.2f}m)\n"
+        
+        return response
+    
     def interactive_mode(self):
-        """Interactive mode - based on cli.py"""
-        print("🏗️ ScaffoldPointLoRA Scaffold Safety Analysis Interactive Mode")
+        """Enhanced interactive mode with data-driven responses"""
+        print("🏗️ Data-Driven Scaffold Safety Analysis Interactive Mode")
         print("Type 'quit' or 'exit' to exit.")
         print("=" * 50)
         
@@ -247,12 +422,15 @@ class ScaffoldSafetyCLI:
             
             # Process with ScaffoldDataProcessor if available
             if self.data_processor is not None:
-                processed_data = self.data_processor.process_scaffold_pointcloud(self.args.pts_file)
-                if processed_data is not None:
-                    print(f"📊 Original shape: {processed_data['original_shape']}")
-                    print(f"✅ Processing complete: {processed_data['processed_shape']}")
+                try:
+                    processed_data = self.data_processor.process_scaffold_pointcloud(self.args.pts_file)
+                    if processed_data is not None:
+                        print(f"📊 Original shape: {processed_data['original_shape']}")
+                        print(f"✅ Processing complete: {processed_data['processed_shape']}")
+                except Exception as e:
+                    print(f"⚠️ Data processor error: {e}")
             
-            # Load point cloud - exactly like cli.py
+            # Load point cloud
             pts = load_pts(self.args.pts_file)
             if self.args.objaverse:
                 pts[:, :3] = rotation(pts[:, :3], [0, 0, -90])
@@ -288,171 +466,73 @@ class ScaffoldSafetyCLI:
             print(f"{roles[1]}: ", end="")
             
             if pts is not None:
-                # First message - add point cloud token like cli.py
+                # First message - add point cloud token
                 if self.model.config.mm_use_pt_start_end:
                     inp = DEFAULT_PT_START_TOKEN + DEFAULT_POINT_TOKEN + DEFAULT_PT_END_TOKEN + '\n' + inp
                 else:
                     inp = DEFAULT_POINT_TOKEN + '\n' + inp
                 self.conv.append_message(self.conv.roles[0], inp)
+                
+                # Force vision tower forward to analyze structure
+                if pts_tensor is not None:
+                    with torch.no_grad():
+                        _ = self.model.get_vision_tower()(pts_tensor)
+                    
+                    # Generate data-driven response
+                    enhanced_response = self._format_data_driven_response(inp, "")
+                    print(enhanced_response)
+                    
+                    # Store response in conversation
+                    self.conv.append_message(self.conv.roles[1], enhanced_response)
+                
                 pts = None  # Reset pts after first use
             else:
-                # Later messages
+                # Later messages - regular processing
                 self.conv.append_message(self.conv.roles[0], inp)
+                self.conv.append_message(self.conv.roles[1], None)
+                prompt = self.conv.get_prompt()
+                
+                # Generate regular response
+                input_ids = tokenizer_point_token(prompt, self.tokenizer, POINT_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+                
+                with torch.inference_mode():
+                    output_ids = self.model.generate(
+                        input_ids,
+                        points=pts_tensor,
+                        do_sample=True if self.args.temperature > 0 else False,
+                        temperature=self.args.temperature,
+                        top_p=self.args.top_p,
+                        num_beams=self.args.num_beams,
+                        max_new_tokens=self.args.max_new_tokens,
+                        use_cache=True
+                    )
+                
+                output = self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
+                
+                # Enhance with analysis data if available
+                if self.current_analysis is not None:
+                    enhanced_output = self._format_data_driven_response(inp, output)
+                    print(enhanced_output)
+                    self.conv.messages[-1][-1] = enhanced_output
+                else:
+                    print(output)
+                    self.conv.messages[-1][-1] = output
             
-            self.conv.append_message(self.conv.roles[1], None)
-            prompt = self.conv.get_prompt()
-            
-            # Tokenize - exactly like cli.py
-            input_ids = tokenizer_point_token(prompt, self.tokenizer, POINT_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-            
-            # Stopping criteria - exactly like cli.py
-            stop_str = self.conv.sep if self.conv.sep_style != SeparatorStyle.TWO else self.conv.sep2
-            keywords = [stop_str]
-            stopping_criteria = KeywordsStoppingCriteria(keywords, self.tokenizer, input_ids)
-            
-            # Streaming output - exactly like cli.py
-            streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
-            
-            # Generate response with proper dtype consistency
-            with torch.inference_mode():
-                output_ids = self.model.generate(
-                    input_ids,
-                    points=pts_tensor,
-                    do_sample=True if self.args.temperature > 0 else False,
-                    temperature=self.args.temperature,
-                    top_p=self.args.top_p,
-                    num_beams=self.args.num_beams,
-                    max_new_tokens=self.args.max_new_tokens,
-                    use_cache=True,
-                    stopping_criteria=[stopping_criteria],
-                    streamer=streamer,
-                )
-            
-            # Process output
-            output = self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
-            self.conv.messages[-1][-1] = output
+            # Show analysis summary if available
+            if self.current_analysis is not None:
+                safety_grade = self.current_analysis['safety_assessment']['overall_grade']
+                issue_count = len(self.current_analysis['specific_issues'])
+                print(f"\n📊 Analysis Summary: Grade {safety_grade}, {issue_count} issues identified")
             
             # Show quick analysis options
             print("\n💡 Quick analysis: 1(comprehensive) | 2(structural) | 3(platform) | 4(height)")
-    
-    def single_analysis_mode(self, analysis_type: str, output_file: Optional[str] = None):
-        """Single analysis mode with fixed dtype handling"""
-        if not self.args.pts_file:
-            print("❌ Point cloud file required for single analysis mode")
-            return
-        
-        print(f"🔍 Single analysis mode: {analysis_type}")
-        
-        # Load point cloud
-        print(f"📂 Processing point cloud: {self.args.pts_file}")
-        
-        # Process with ScaffoldDataProcessor if available
-        processed_data = {}
-        if self.data_processor is not None:
-            processed_data = self.data_processor.process_scaffold_pointcloud(self.args.pts_file)
-            if processed_data is not None:
-                print(f"📊 Original shape: {processed_data['original_shape']}")
-                print(f"✅ Processing complete: {processed_data['processed_shape']}")
-        
-        # Load point cloud
-        pts = load_pts(self.args.pts_file)
-        if self.args.objaverse:
-            pts[:, :3] = rotation(pts[:, :3], [0, 0, -90])
-        pts_tensor = process_pts(pts, self.model.config).unsqueeze(0)
-        
-        # Ensure consistent dtype and device
-        model_device = next(self.model.parameters()).device
-        model_dtype = next(self.model.parameters()).dtype
-        pts_tensor = pts_tensor.to(device=model_device, dtype=model_dtype)
-        
-        # Get prompt
-        prompt = self.safety_prompts.get(analysis_type, self.safety_prompts['comprehensive'])
-        
-        # Add point cloud token
-        if self.model.config.mm_use_pt_start_end:
-            prompt = DEFAULT_PT_START_TOKEN + DEFAULT_POINT_TOKEN + DEFAULT_PT_END_TOKEN + '\n' + prompt
-        else:
-            prompt = DEFAULT_POINT_TOKEN + '\n' + prompt
-        
-        self.conv.append_message(self.conv.roles[0], prompt)
-        self.conv.append_message(self.conv.roles[1], None)
-        prompt_text = self.conv.get_prompt()
-        
-        # Generate response
-        input_ids = tokenizer_point_token(prompt_text, self.tokenizer, POINT_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-        
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                input_ids,
-                points=pts_tensor,
-                do_sample=True if self.args.temperature > 0 else False,
-                temperature=self.args.temperature,
-                top_p=self.args.top_p,
-                num_beams=self.args.num_beams,
-                max_new_tokens=self.args.max_new_tokens,
-                use_cache=True
-            )
-        
-        # Decode output
-        output = self.tokenizer.decode(output_ids[0, input_ids.shape[1]:], skip_special_tokens=True).strip()
-        
-        # Create result
-        result = {
-            'analysis_type': analysis_type,
-            'pts_file': self.args.pts_file,
-            'processed_data': processed_data,
-            'ai_response': output
-        }
-        
-        # Save result if output file specified
-        if output_file:
-            with open(output_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            print(f"✅ Result saved to: {output_file}")
-        
-        # Display result
-        self._display_analysis_result(result)
-    
-    def _display_analysis_result(self, result: Dict[str, Any]):
-        """Display analysis result"""
-        print("\n" + "=" * 60)
-        print("📋 SCAFFOLD SAFETY ANALYSIS RESULT")
-        print("=" * 60)
-        
-        # Basic info
-        print(f"📂 Point cloud file: {result['pts_file']}")
-        print(f"🔍 Analysis type: {result['analysis_type']}")
-        
-        # Processed data info
-        if result['processed_data']:
-            processed_data = result['processed_data']
-            print(f"📊 Original shape: {processed_data.get('original_shape', 'N/A')}")
-            print(f"📊 Processed shape: {processed_data.get('processed_shape', 'N/A')}")
-        
-        # ScaffoldPointLoRA info
-        if hasattr(self, '_last_selection_info') and self._last_selection_info:
-            pointlora_info = self._last_selection_info
-            print(f"🎯 ScaffoldPointLoRA selected tokens: {pointlora_info['total_selected']}")
-            print(f"   - Global structure: {pointlora_info['global_count']}")
-            print(f"   - Components: {pointlora_info['component_count']}")
-            print(f"   - Details: {pointlora_info['detail_count']}")
-        
-        # AI analysis result
-        print(f"\n🤖 AI Safety Analysis:")
-        print("-" * 40)
-        ai_response = result['ai_response']
-        for line in ai_response.split('\n'):
-            if line.strip():
-                print(f"   {line}")
-        
-        print("\n" + "=" * 60)
 
 
 def main():
-    """Main function - based on cli.py"""
-    parser = argparse.ArgumentParser(description='Fixed ScaffoldPointLoRA integrated ShapeLLM CLI')
+    """Main function"""
+    parser = argparse.ArgumentParser(description='Data-driven ScaffoldPointLoRA integrated ShapeLLM CLI')
     
-    # Model arguments - same as cli.py
+    # Model arguments
     parser.add_argument("--model-path", type=str, default="qizekun/ShapeLLM_13B_general_v1.0")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
@@ -460,7 +540,7 @@ def main():
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")
     
-    # Point cloud arguments - same as cli.py
+    # Point cloud arguments
     parser.add_argument("--pts-file", type=str, help="Scaffold point cloud file (.npy)")
     parser.add_argument("--objaverse", action="store_true", help="Apply Objaverse data rotation")
     
@@ -470,7 +550,7 @@ def main():
     parser.add_argument("--scaffold-lora-alpha", type=float, default=32.0, help="LoRA alpha")
     parser.add_argument("--training-stage", type=str, choices=['lora_only', 'full'], default='lora_only')
     
-    # Generation arguments - same as cli.py
+    # Generation arguments
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--num-beams", type=int, default=1)
@@ -496,7 +576,7 @@ def main():
         return
     
     # Initialize and run CLI
-    print("🏗️ ScaffoldPointLoRA Scaffold Safety Analysis System")
+    print("🏗️ Data-Driven Scaffold Safety Analysis System")
     print(f"📂 Model: {args.model_path}")
     if args.pts_file:
         print(f"📂 Input file: {args.pts_file}")
@@ -505,16 +585,13 @@ def main():
     
     try:
         # Create CLI instance
-        cli = ScaffoldSafetyCLI(args)
+        cli = DataDrivenScaffoldCLI(args)
         
         # Load model
         cli.load_model()
         
-        # Run based on mode
-        if args.mode == 'interactive':
-            cli.interactive_mode()
-        else:  # single mode
-            cli.single_analysis_mode(args.analysis_type, args.output)
+        # Run interactive mode
+        cli.interactive_mode()
             
     except KeyboardInterrupt:
         print("\n👋 User interrupted.")
