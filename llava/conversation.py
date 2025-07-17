@@ -236,6 +236,20 @@ conv_llava_v1 = Conversation(
     sep2="</s>",
 )
 
+conv_scaffold_safety = Conversation(
+    system="You are a professional scaffold safety inspector AI. "
+           "Analyze the 3D point cloud of scaffold structures for safety compliance. "
+           "Focus on structural integrity, working platform safety, and height safety measures. "
+           "Provide detailed safety assessments with specific recommendations.",
+    roles=("INSPECTOR", "ASSISTANT"),
+    version="scaffold_v1",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.TWO,
+    sep=" ",
+    sep2="</s>",
+)
+
 # conversation.py (수정 후)
 
 # conversation.py (수정 후 - '깊은 수평면' 힌트 반영)
@@ -278,6 +292,7 @@ conv_templates = {
     "llava_llama_2": conv_llava_llama_2,
     "llava_sw": conv_llava_SW,
     "mpt": conv_mpt,
+    "scaffold_safety" : conv_scaffold_safety,
 }
 
 
