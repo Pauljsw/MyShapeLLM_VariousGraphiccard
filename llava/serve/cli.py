@@ -17,7 +17,7 @@ def main(args):
     tokenizer, model, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.load_8bit,
                                                           args.load_4bit, device=args.device)
 
-    conv_mode = "llava_sw"
+    conv_mode = "vicuna_v1"
 
     if args.conv_mode is not None and conv_mode != args.conv_mode:
         print(
