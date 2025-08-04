@@ -9,7 +9,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.integrate_shapellm_fixed import test_fixed_integration, create_scaffold_model
+from scaffold_safety_ai.src.integrate_shapellm import test_fixed_integration, create_scaffold_model
 from src.pointlora_core import test_pointlora_components
 
 def test_all_components():
