@@ -1,223 +1,305 @@
-# src/integrate_shapellm.py
-import sys
-import os
-sys.path.append('/home/aimgroup/ChoSW/mcp-server-demo/ShapeLLM')
+# LayerNorm 차원 오류 수정
+# scaffold_safety_ai/src/integrate_shapellm_fixed.py 의 SafetyTokenSelector 부분 수정
 
 import torch
 import torch.nn as nn
-from scaffold_safety_ai.src.pointlora_core import LoRALayer, SafetyTokenSelector
+import sys
+import os
+from pathlib import Path
 
-# ✅ 간단한 해결: CLIPVisionTower import 성공만 확인하고 Mock 사용
-try:
-    from llava.model.multimodal_encoder.clip_encoder import CLIPVisionTower
-    print("✅ Successfully imported CLIPVisionTower (ReCon2 based)")
-    SHAPELLM_IMPORT_SUCCESS = True
-except ImportError:
-    try:
-        from llava.model.multimodal_encoder.recon_encoder import ReconVisionTower  
-        print("✅ Successfully imported ReconVisionTower")
-        SHAPELLM_IMPORT_SUCCESS = True
-    except ImportError as e:
-        print(f"❌ Import failed: {e}")
-        SHAPELLM_IMPORT_SUCCESS = False
+# PointLoRA 핵심 모듈 import (기존 파일 사용)
+from .pointlora_core import LoRALayer, SafetyTokenSelector
 
-print("Falling back to mock implementation for testing...")
+class SafeShapeLLMIntegration:
+    """
+    안전한 ShapeLLM 통합 방식
+    기존 코드의 import 오류와 구조적 문제 해결
+    """
+    
+    def __init__(self, shapellm_path: str = None):
+        self.shapellm_path = Path(shapellm_path) if shapellm_path else Path.cwd()
+        self.setup_environment()
+        
+    def setup_environment(self):
+        """ShapeLLM 환경 안전하게 설정"""
+        try:
+            # ShapeLLM 경로를 Python path에 추가
+            if str(self.shapellm_path) not in sys.path:
+                sys.path.insert(0, str(self.shapellm_path))
+            
+            # 실제 ShapeLLM 디렉토리 찾기
+            shapellm_dirs = [
+                self.shapellm_path.parent,  # 상위 디렉토리 확인
+                self.shapellm_path.parent.parent,  # 더 상위 확인
+                Path("/home/aimgroup/ChoSW/mcp-server-demo/ShapeLLM")  # 실제 경로
+            ]
+            
+            for potential_dir in shapellm_dirs:
+                if (potential_dir / "llava").exists():
+                    self.shapellm_path = potential_dir
+                    if str(potential_dir) not in sys.path:
+                        sys.path.insert(0, str(potential_dir))
+                    print(f"✅ Found ShapeLLM at: {potential_dir}")
+                    break
+            else:
+                print(f"⚠️ ShapeLLM llava directory not found, using mock mode")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Environment setup failed: {e}")
+            return False
 
-# ✅ 항상 Mock 사용하되, import 성공 여부만 확인
-class ReconVisionTower(nn.Module):
-    """Mock ReconVisionTower for testing"""
-    def __init__(self, *args, **kwargs):
+class FixedSafetyTokenSelector(nn.Module):
+    """
+    수정된 Safety Token Selector - LayerNorm 오류 해결
+    """
+    
+    def __init__(self, feature_dim: int = 768, safety_token_count: int = 40):
         super().__init__()
-        self.vision_tower = nn.Module()
-        self.vision_tower.model = nn.Module()
-        self.vision_tower.model.encoder = nn.Module()
-        self.vision_tower.model.encoder.blocks = nn.ModuleList([
-            self._create_mock_transformer_block() for _ in range(12)
-        ])
+        self.feature_dim = feature_dim
+        self.safety_token_count = safety_token_count
         
-    def _create_mock_transformer_block(self):
-        """Create mock transformer block"""
-        block = nn.Module()
-        block.attn = nn.Module()
-        block.attn.qkv = nn.Linear(768, 768*3)
-        block.mlp = nn.Module() 
-        block.mlp.fc1 = nn.Linear(768, 3072)
-        block.mlp.fc1.out_features = 3072
-        return block
-        
-    def forward(self, x):
-        return torch.randn(1, 512, 768)  # Mock output
-
-
-class ScaffoldPointLoRAEncoder(ReconVisionTower):
-    """
-    ShapeLLM ReCon++ + PointLoRA Integration for Scaffold Safety Analysis
-    
-    핵심 아이디어:
-    1. 기존 ReCon++ weights는 고정 (frozen)
-    2. LoRA만 학습하여 scaffold safety domain adaptation
-    3. Safety-aware token selection으로 중요 영역 집중
-    """
-    
-    def __init__(self, vision_tower_cfg=None, **kwargs):
-        super().__init__(vision_tower_cfg, **kwargs)
-        
-        # PointLoRA 하이퍼파라미터
-        self.lora_rank = kwargs.get('lora_rank', 8)
-        self.lora_alpha = kwargs.get('lora_alpha', 32)
-        self.safety_token_count = kwargs.get('safety_token_count', 40)
-        
-        # Safety Token Selector 초기화
-        self.safety_token_selector = SafetyTokenSelector(
-            feature_dim=768, 
-            safety_token_count=self.safety_token_count
+        # 수정된 importance predictor - LayerNorm 위치 변경
+        self.importance_network = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.LayerNorm(feature_dim // 2),  # 입력 차원에 맞게 수정
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()
         )
         
-        # ReCon++ Transformer에 LoRA layers 추가
-        self._inject_lora_layers()
+        print(f"✅ FixedSafetyTokenSelector initialized: {feature_dim}D → {safety_token_count} tokens")
         
-        # 학습 가능한 파라미터 통계
-        self._print_parameter_stats()
-        
-    def _inject_lora_layers(self):
-        """ReCon++ Transformer blocks에 LoRA 주입"""
-        print("🔧 Injecting LoRA layers into ReCon++ Transformer...")
-        
-        for i, block in enumerate(self.vision_tower.model.encoder.blocks):
-            # QKV projection에 LoRA 추가
-            qkv_in_features = block.attn.qkv.in_features  # 768
-            qkv_out_features = qkv_in_features * 3  # 2304 (Q,K,V)
-            
-            block.attn.qkv_lora = LoRALayer(
-                in_features=qkv_in_features,
-                out_features=qkv_out_features,
-                rank=self.lora_rank,
-                alpha=self.lora_alpha
-            )
-            
-            # FFN FC1에 LoRA 추가
-            ffn_in_features = block.mlp.fc1.in_features  # 768
-            ffn_out_features = block.mlp.fc1.out_features  # 3072
-            
-            block.mlp.fc1_lora = LoRALayer(
-                in_features=ffn_in_features,
-                out_features=ffn_out_features,
-                rank=self.lora_rank,
-                alpha=self.lora_alpha
-            )
-            
-            print(f"  ✅ Block {i}: QKV LoRA + FFN LoRA injected")
-    
-    def _print_parameter_stats(self):
-        """학습 가능한 파라미터 통계 출력"""
-        total_params = 0
-        lora_params = 0
-        
-        for name, param in self.named_parameters():
-            total_params += param.numel()
-            if 'lora' in name or 'safety_token_selector' in name:
-                lora_params += param.numel()
-                
-        efficiency = (lora_params / total_params) * 100
-        
-        print(f"\n📊 Parameter Statistics:")
-        print(f"  Total Parameters: {total_params:,}")
-        print(f"  LoRA Parameters: {lora_params:,}")
-        print(f"  Efficiency: {efficiency:.2f}% (Target: ~3.43%)")
-        print(f"  Memory Savings: {(1 - efficiency/100)*100:.1f}%")
-        
-        # ✅ 상태 표시 개선
-        if SHAPELLM_IMPORT_SUCCESS:
-            print("✅ ShapeLLM import successful - ready for real integration")
-        else:
-            print("⚠️ ShapeLLM import failed - using mock for development")
-    
-    def forward_with_scaffold_analysis(self, point_cloud: torch.Tensor):
+    def forward(self, features: torch.Tensor):
         """
-        Scaffold-specific forward pass with safety analysis
+        Safety token selection with fixed dimensions
         
         Args:
-            point_cloud: [batch_size, 8192, 3] or [batch_size, 8192, 6]
+            features: [batch_size, seq_len, feature_dim]
             
         Returns:
-            dict with safety analysis results
+            safety_tokens: [batch_size, safety_token_count, feature_dim]
+            selected_indices: [batch_size, safety_token_count]
         """
-        # 1. 기본 ReCon++ forward (frozen weights)
-        with torch.no_grad():
-            base_features = super().forward(point_cloud)  # [batch, 512, 768]
+        batch_size, seq_len, feat_dim = features.shape
         
-        # 2. LoRA 적용된 enhanced features (이 부분은 실제 구현에서 더 정교하게)
-        enhanced_features = base_features  # 일단 기본 features 사용
+        # Importance scoring with correct dimensions
+        scores = self.importance_network(features).squeeze(-1)  # [B, S]
         
-        # 3. Safety-critical regions 선택
-        safety_tokens = self.safety_token_selector(enhanced_features)
+        # Top-K selection
+        k = min(self.safety_token_count, seq_len)
+        _, indices = torch.topk(scores, k, dim=1)
         
-        # 4. Safety analysis 결과 구성
-        results = {
-            'base_features': base_features,
-            'safety_tokens': safety_tokens,  # [batch, 40, 768] - 가장 중요!
-            'safety_indices': torch.randint(0, base_features.shape[1], (base_features.shape[0], self.safety_token_count)),  # Mock indices
-            'analysis_summary': {
-                'total_patches': base_features.shape[1],
-                'safety_patches': safety_tokens.shape[1],
-                'coverage_ratio': safety_tokens.shape[1] / base_features.shape[1]
-            }
+        # Extract tokens
+        safety_tokens = torch.gather(
+            features, 1, 
+            indices.unsqueeze(-1).expand(-1, -1, feat_dim)
+        )
+        
+        return safety_tokens, indices
+
+class ScaffoldSafetyWrapper(nn.Module):
+    """
+    수정된 Scaffold Safety 래퍼 - LayerNorm 오류 해결
+    """
+    
+    def __init__(self, config: dict = None):
+        super().__init__()
+        
+        # 기본 설정
+        self.config = config or {
+            'lora_rank': 16,
+            'lora_alpha': 32,
+            'safety_token_count': 40,
+            'feature_dim': 768
         }
         
-        return results
+        # 수정된 PointLoRA 구성 요소들
+        self.safety_selector = FixedSafetyTokenSelector(  # 수정된 버전 사용
+            feature_dim=self.config['feature_dim'],
+            safety_token_count=self.config['safety_token_count']
+        )
+        
+        # 수정된 Safety classifier - LayerNorm 위치 조정
+        self.safety_classifier = nn.Sequential(
+            nn.Linear(self.config['feature_dim'], self.config['feature_dim'] // 2),
+            nn.LayerNorm(self.config['feature_dim'] // 2),  # 차원 맞춤
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(self.config['feature_dim'] // 2, 3)  # safe, warning, danger
+        )
+        
+        # LoRA layers storage
+        self.lora_layers = nn.ModuleDict()
+        
+        # 수정된 Mock feature extractor
+        self.mock_feature_extractor = self._create_mock_feature_extractor()
+        
+        print(f"✅ ScaffoldSafetyWrapper initialized")
+        self._print_parameter_stats()
     
-    def set_training_mode(self, scaffold_mode: bool = True):
-        """
-        훈련 모드 설정: LoRA만 학습, 나머지는 고정
-        """
-        # 전체 모델 freeze
+    def _create_mock_feature_extractor(self):
+        """수정된 Mock feature extractor"""
+        return nn.Sequential(
+            nn.Linear(6, 256),  # xyz+rgb input
+            nn.LayerNorm(256),  # 올바른 차원
+            nn.ReLU(),
+            nn.Linear(256, self.config['feature_dim']),
+            nn.LayerNorm(self.config['feature_dim'])  # 올바른 차원
+        )
+    
+    # src/integrate_shapellm.py 의 add_lora_layer 함수 수정
+    def add_lora_layer(self, layer_name: str, in_features: int, out_features: int):
+        lora_layer = LoRALayer(
+            in_features=in_features,
+            out_features=out_features,
+            rank=self.config['lora_rank'],
+            alpha=self.config['lora_alpha']
+        )
+        # 핵심: nn.ModuleDict에 등록해야 parameters()에 포함됨
+        self.lora_layers[layer_name] = lora_layer
+        
+        # 추가: 명시적으로 parameter 등록 확인
+        print(f"✅ LoRA layer added: {layer_name}")
+        print(f"   Parameters registered: {any(p.requires_grad for p in lora_layer.parameters())}")
+    
+    def forward_safety_analysis(self, point_cloud: torch.Tensor):
+        batch_size, num_points, point_dim = point_cloud.shape
+        
+        # 포인트 처리
+        if num_points > 512:
+            indices = torch.randperm(num_points)[:512]
+            sampled_points = point_cloud[:, indices, :]
+        else:
+            sampled_points = point_cloud
+            if sampled_points.shape[1] < 512:
+                padding_size = 512 - sampled_points.shape[1] 
+                padding = torch.zeros(batch_size, padding_size, point_dim)
+                sampled_points = torch.cat([sampled_points, padding], dim=1)
+        
+        # Mock feature extraction
+        features = self.mock_feature_extractor(sampled_points)  # [batch, 512, 768]
+        
+        # ✅ 여기서 LoRA 적용!
+        enhanced_features = features
+        for lora_name, lora_layer in self.lora_layers.items():
+            if 'attention' in lora_name:
+                enhanced_features = enhanced_features + lora_layer(enhanced_features)
+            elif 'mlp' in lora_name:
+                enhanced_features = enhanced_features + lora_layer(enhanced_features)
+        
+        # Safety token selection (enhanced_features 사용)
+        safety_tokens, safety_indices = self.safety_selector(enhanced_features)
+        
+        # Safety classification
+        avg_safety_features = safety_tokens.mean(dim=1)
+        safety_logits = self.safety_classifier(avg_safety_features)
+        safety_probs = torch.softmax(safety_logits, dim=-1)
+        
+        return {
+            'safety_tokens': safety_tokens,
+            'safety_indices': safety_indices,
+            'safety_logits': safety_logits,
+            'safety_probs': safety_probs,
+            'features': enhanced_features,  # enhanced_features 반환
+            'predicted_class': torch.argmax(safety_probs, dim=-1),
+            'confidence': torch.max(safety_probs, dim=-1)[0]
+        }
+    
+    # src/integrate_shapellm.py
+    def set_training_mode(self, scaffold_training: bool = True):
         for param in self.parameters():
             param.requires_grad = False
-            
-        if scaffold_mode:
-            # LoRA와 Safety Token Selector만 학습 가능
-            for name, param in self.named_parameters():
-                if 'lora' in name or 'safety_token_selector' in name:
+        
+        if scaffold_training:
+            # LoRA 파라미터만 활성화
+            for lora_layer in self.lora_layers.values():
+                for param in lora_layer.parameters():
                     param.requires_grad = True
-                    
+        
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"🎯 Training mode: {trainable_params:,} trainable parameters")
-
-
-def test_scaffold_integration():
-    """ScaffoldPointLoRAEncoder 통합 테스트"""
-    print("\n🧪 Testing Scaffold-PointLoRA Integration...")
+        total_params = sum(p.numel() for p in self.parameters())
+        
+        print(f"🎯 Training mode set:")
+        print(f"   Trainable: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
     
-    # 모델 초기화
+        # src/integrate_shapellm.py 의 _print_parameter_stats 함수 수정
+    def _print_parameter_stats(self):
+        total_params = sum(p.numel() for p in self.parameters())
+        
+        # 수정: LoRA 파라미터 정확히 계산
+        lora_params = 0
+        for lora_layer in self.lora_layers.values():
+            lora_params += sum(p.numel() for p in lora_layer.parameters())
+        
+        safety_params = sum(p.numel() for name, p in self.named_parameters() 
+                        if 'safety' in name)
+        
+        print(f"📊 Parameter Statistics:")
+        print(f"   Total: {total_params:,}")
+        print(f"   LoRA: {lora_params:,}")
+        print(f"   Safety: {safety_params:,}")
+        print(f"   Trainable: {lora_params + safety_params:,}")
+
+def create_scaffold_model(config: dict = None):
+    """Scaffold Safety 모델 생성 함수"""
+    return ScaffoldSafetyWrapper(config)
+
+# ============================================================================
+# 수정된 테스트 함수
+# ============================================================================
+
+def test_fixed_integration():
+    """수정된 통합 코드 테스트"""
+    print("🧪 Testing Fixed Integration...")
+    
+    # 1. 환경 설정 테스트
+    integration = SafeShapeLLMIntegration()
+    
+    # 2. 모델 생성 테스트
     config = {
         'lora_rank': 16,
         'lora_alpha': 32,
-        'safety_token_count': 40
+        'safety_token_count': 40,
+        'feature_dim': 768
     }
     
-    model = ScaffoldPointLoRAEncoder(**config)
+    model = create_scaffold_model(config)
     
-    # 훈련 모드 설정
-    model.set_training_mode(scaffold_mode=True)
+    # 3. LoRA 레이어 추가 테스트
+    model.add_lora_layer('attention_qkv', 768, 768*3)
+    model.add_lora_layer('mlp_fc1', 768, 3072)
     
-    # 테스트 데이터 (실제 ShapeLLM 입력 형태)
-    test_scaffold = torch.randn(1, 8192, 6)  # batch=1, points=8192, xyz+rgb
+    # 4. 훈련 모드 설정
+    model.set_training_mode(scaffold_training=True)
     
-    # Forward pass
-    print("\n🚀 Running scaffold safety analysis...")
-    results = model.forward_with_scaffold_analysis(test_scaffold)
+    # 5. Forward pass 테스트 - 차원 안전성 확보
+    print("🚀 Testing forward pass with dimension safety...")
+    test_point_cloud = torch.randn(2, 8192, 6)  # batch=2, points=8192, xyz+rgb
     
-    # 결과 확인
-    print(f"\n📋 Analysis Results:")
-    print(f"  Base features: {results['base_features'].shape}")
-    print(f"  Safety tokens: {results['safety_tokens'].shape}")
-    print(f"  Safety indices: {results['safety_indices'].shape}")
-    print(f"  Coverage ratio: {results['analysis_summary']['coverage_ratio']:.1%}")
-    
-    print("\n✅ Scaffold-PointLoRA integration successful!")
-    
-    return model, results
-
+    try:
+        with torch.no_grad():
+            results = model.forward_safety_analysis(test_point_cloud)
+        
+        print(f"✅ Test Results:")
+        print(f"   Safety tokens: {results['safety_tokens'].shape}")
+        print(f"   Predicted classes: {results['predicted_class']}")
+        print(f"   Confidence: {results['confidence']}")
+        
+        return model, results
+        
+    except Exception as e:
+        print(f"❌ Forward pass failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 if __name__ == "__main__":
-    model, results = test_scaffold_integration()
+    # 수정된 통합 테스트 실행
+    model, results = test_fixed_integration()
+    if model is not None:
+        print("✅ Fixed integration test completed!")
+    else:
+        print("❌ Integration test failed!")
