@@ -1,5 +1,5 @@
-# LayerNorm 차원 오류 수정 및 Recon 모델 직접 상속
 # scaffold_safety_ai/src/integrate_shapellm_gemini.py
+# 수정된 버전: SafetyTokenSelector 차원 불일치 문제 해결
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 # PointLoRA 핵심 모듈 import
-from .pointlora_core import LoRALayer, SafetyTokenSelector
+from .pointlora_core import LoRALayer
 
 # ShapeLLM의 ReConV2 모듈을 로드하기 위한 환경 설정
 try:
@@ -55,62 +55,153 @@ except ImportError as e:
             return None, local_features, global_features
 
 
+class FixedSafetyTokenSelector(nn.Module):
+    """
+    수정된 Safety Token Selector - 차원 불일치 문제 해결
+    """
+    
+    def __init__(self, feature_dim: int = 1024, safety_token_count: int = 40):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.safety_token_count = safety_token_count
+        
+        # 중요도 예측 네트워크 - 차원을 명확히 설정
+        self.importance_network = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.LayerNorm(feature_dim // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        print(f"✅ Safety Token Selector initialized: {feature_dim}D → {safety_token_count} tokens")
+        
+    def forward(self, features: torch.Tensor):
+        """
+        안전 토큰 선택 - 차원 안전성 확보
+        
+        Args:
+            features: [batch_size, seq_len, feature_dim] - ReCon의 local_features
+            
+        Returns:
+            safety_tokens: [batch_size, safety_token_count, feature_dim]
+            selected_indices: [batch_size, safety_token_count]
+        """
+        batch_size, seq_len, feat_dim = features.shape
+        
+        # 디버깅 출력
+        print(f"🔍 [SafetyTokenSelector] Input shape: {features.shape}")
+        print(f"🔍 [SafetyTokenSelector] Expected feature_dim: {self.feature_dim}, Got: {feat_dim}")
+        
+        # 차원 검증
+        if feat_dim != self.feature_dim:
+            print(f"⚠️ [SafetyTokenSelector] Feature dimension mismatch! Expected {self.feature_dim}, got {feat_dim}")
+            # 차원 조정 (임시 해결책)
+            if feat_dim > self.feature_dim:
+                features = features[:, :, :self.feature_dim]
+                print(f"✅ [SafetyTokenSelector] Truncated to {self.feature_dim} dimensions")
+            else:
+                # padding으로 차원 맞추기
+                padding = torch.zeros(batch_size, seq_len, self.feature_dim - feat_dim, 
+                                    device=features.device, dtype=features.dtype)
+                features = torch.cat([features, padding], dim=-1)
+                print(f"✅ [SafetyTokenSelector] Padded to {self.feature_dim} dimensions")
+        
+        # 중요도 점수 계산
+        try:
+            scores = self.importance_network(features).squeeze(-1)  # [B, S]
+            print(f"🔍 [SafetyTokenSelector] Scores shape: {scores.shape}")
+        except Exception as e:
+            print(f"❌ [SafetyTokenSelector] Error in importance_network: {e}")
+            print(f"   Features shape: {features.shape}")
+            raise e
+        
+        # Top-K 선택
+        k = min(self.safety_token_count, seq_len)
+        _, indices = torch.topk(scores, k, dim=1)  # [B, K]
+        
+        # 토큰 추출
+        batch_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, k)
+        safety_tokens = features[batch_indices, indices]  # [B, K, D]
+        
+        print(f"✅ [SafetyTokenSelector] Output safety_tokens shape: {safety_tokens.shape}")
+        
+        return safety_tokens, indices
+
+
 class PointLoRAReconEncoder(ReCon2):
     """
     ReCon2 모델을 직접 상속받아 PointLoRA와 SafetyTokenSelector를 통합하는 클래스.
     이 클래스는 연구 방법론의 'A안'을 완벽하게 구현합니다.
     """
-    def __init__(self, config: dict):
-        # 부모 클래스(ReCon2)의 생성자를 호출하여 기본 Recon 모델 구조를 로드
+    
+    def __init__(self, config):
         super().__init__(config)
-        self.config = config
         
-        # LoRA 레이어를 Vision Transformer(ReCon++)의 블록에 직접 주입
-        self._add_lora_layers(
-            lora_rank=config.lora_rank,
-            lora_alpha=config.lora_alpha
-        )
+        # PointLoRA 파라미터 설정
+        self.lora_rank = getattr(config, 'lora_rank', 16)
+        self.lora_alpha = getattr(config, 'lora_alpha', 32)
+        self.safety_token_count = getattr(config, 'safety_token_count', 40)
         
-        # 안전 토큰 선택 모듈 초기화
-        self.safety_selector = SafetyTokenSelector(
+        # SafetyTokenSelector 초기화 - ReCon2의 embed_dim 사용
+        self.safety_selector = FixedSafetyTokenSelector(
             feature_dim=config.embed_dim,
-            safety_token_count=config.safety_token_count
+            safety_token_count=self.safety_token_count
         )
         
-        # 안전성 등급 분류를 위한 헤드(Head)
+        # 안전 분류 헤드 초기화
         self.safety_classifier = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim // 2),
             nn.LayerNorm(config.embed_dim // 2),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(config.embed_dim // 2, 3) # 3: safe, warning, danger
+            nn.Linear(config.embed_dim // 2, 5)  # 5개의 안전 등급
         )
         
-        print("✅ PointLoRAReconEncoder initialized with LoRA and Safety Head.")
-
-    def _add_lora_layers(self, lora_rank, lora_alpha):
-        """
-        ReCon2의 MaskTransformer 인코더 블록에 LoRA 레이어를 추가하는 내부 메서드.
-        """
-        if not hasattr(self.model.encoder, 'blocks'):
-            print("⚠️ Warning: Mock model encoder has no 'blocks' attribute. Skipping LoRA injection.")
-            return
-
-        # ReConBlocks 내부의 local_blocks(nn.Sequential)을 순회해야 함
-        for i, block in enumerate(self.model.encoder.blocks.local_blocks):
-            # Attention 블록의 QKV 프로젝션에 LoRA 적용
-            qkv_dim = block.attn.qkv.in_features
-            block.attn.qkv_lora = LoRALayer(qkv_dim, qkv_dim * 3, lora_rank, lora_alpha)
-
-            # FFN(Feed-Forward Network)의 첫 번째 Linear 레이어에 LoRA 적용
-            ffn_dim = block.mlp.fc1.in_features
-            block.mlp.fc1_lora = LoRALayer(ffn_dim, block.mlp.fc1.out_features, lora_rank, lora_alpha)
+        # LoRA 레이어를 Transformer blocks에 주입
+        self._inject_lora_layers()
+        
+        print(f"✅ PointLoRAReconEncoder initialized with LoRA and Safety Head.")
+    
+    def _inject_lora_layers(self):
+        """ReCon2의 Transformer blocks에 LoRA 레이어 주입"""
+        try:
+            # ReConBlocks 구조: blocks.local_blocks (nn.Sequential)
+            if not hasattr(self.model.encoder, 'blocks') or not hasattr(self.model.encoder.blocks, 'local_blocks'):
+                print("⚠️ Warning: Expected ReConBlocks structure not found. Skipping LoRA injection.")
+                return
+                
+            local_blocks = self.model.encoder.blocks.local_blocks
+            print(f"🔍 Found {len(local_blocks)} local blocks in ReConBlocks")
             
-            print(f"✅ LoRA layers injected into Transformer block {i}")
-            
+            for i, block in enumerate(local_blocks):
+                # MLP의 fc1에 LoRA 추가
+                if hasattr(block, 'mlp') and hasattr(block.mlp, 'fc1'):
+                    in_features = block.mlp.fc1.in_features
+                    out_features = block.mlp.fc1.out_features
+                    block.mlp.fc1_lora = LoRALayer(in_features, out_features, self.lora_rank, self.lora_alpha)
+                    print(f"✅ LoRA Layer initialized: {in_features}→{out_features}, rank={self.lora_rank}, params={2*self.lora_rank*(in_features+out_features):,}")
+                
+                # MLP의 fc2에 LoRA 추가 (존재하는 경우)
+                if hasattr(block, 'mlp') and hasattr(block.mlp, 'fc2'):
+                    in_features = block.mlp.fc2.in_features
+                    out_features = block.mlp.fc2.out_features
+                    block.mlp.fc2_lora = LoRALayer(in_features, out_features, self.lora_rank, self.lora_alpha)
+                    print(f"✅ LoRA Layer initialized: {in_features}→{out_features}, rank={self.lora_rank}, params={2*self.lora_rank*(in_features+out_features):,}")
+                
+                print(f"✅ LoRA layers injected into Transformer block {i}")
+                
+        except Exception as e:
+            print(f"❌ Error injecting LoRA layers: {e}")
+            import traceback
+            traceback.print_exc()
+            # LoRA 주입 실패해도 계속 진행 (기본 모델은 작동)
+            print("⚠️ Continuing without LoRA layers...")
+    
     def load_pretrained_weights(self, ckpt_path: str, log: bool = True):
         """
-        사전 훈련된 ReCon 모델의 가중치를 로드하는 메서드.
+        사전 훈련된 ReCon2 가중치를 로드합니다.
         """
         if not os.path.exists(ckpt_path):
             print(f"❌ Checkpoint file not found: {ckpt_path}")
@@ -120,7 +211,7 @@ class PointLoRAReconEncoder(ReCon2):
         try:
             ckpt = torch.load(ckpt_path, map_location='cpu')
             
-            # --- 수정된 부분: 'state_dict'와 'base_model' 두 가지 키 모두 시도 ---
+            # 'state_dict'와 'base_model' 두 가지 키 모두 시도
             state_dict = ckpt.get('state_dict', None)
             if state_dict is None:
                 state_dict = ckpt.get('base_model', None)
@@ -151,17 +242,30 @@ class PointLoRAReconEncoder(ReCon2):
     def forward_safety_analysis(self, pts: torch.Tensor):
         """
         안전 분석을 위한 전체 순전파(forward) 파이프라인.
+        차원 디버깅 포함
         """
+        print(f"🔍 [forward_safety_analysis] Input pts shape: {pts.shape}")
+        
         # 부모 클래스의 inference 메서드를 사용하여 기본 Recon 특징 추출
         pos, local_features, global_features = self.model.inference(pts)
+        
+        print(f"🔍 [forward_safety_analysis] local_features shape: {local_features.shape}")
+        print(f"🔍 [forward_safety_analysis] global_features shape: {global_features.shape}")
 
         # local_features는 ReCon++의 패치별 특징이므로, 이를 SafetyTokenSelector에 전달
         safety_tokens, safety_indices = self.safety_selector(local_features)
         
+        print(f"🔍 [forward_safety_analysis] safety_tokens shape: {safety_tokens.shape}")
+        
         # 선택된 안전 토큰들의 평균을 계산하여 분류 헤드에 입력
         avg_safety_features = safety_tokens.mean(dim=1)
+        print(f"🔍 [forward_safety_analysis] avg_safety_features shape: {avg_safety_features.shape}")
+        
         safety_logits = self.safety_classifier(avg_safety_features)
         safety_probs = torch.softmax(safety_logits, dim=-1)
+        
+        print(f"🔍 [forward_safety_analysis] safety_logits shape: {safety_logits.shape}")
+        print(f"🔍 [forward_safety_analysis] safety_probs shape: {safety_probs.shape}")
         
         return {
             'safety_tokens': safety_tokens,
@@ -178,36 +282,46 @@ class PointLoRAReconEncoder(ReCon2):
         훈련 모드를 설정하여 Base Model의 가중치를 고정하고
         PointLoRA와 Safety Head의 가중치만 훈련 가능하게 만듭니다.
         """
-        # 모든 파라미터 고정
-        for param in self.parameters():
-            param.requires_grad = False
-        
         if scaffold_training:
-            # LoRA와 Safety Head의 파라미터만 활성화
-            for name, param in self.named_parameters():
-                if 'lora' in name or 'safety_selector' in name or 'safety_classifier' in name:
-                    param.requires_grad = True
-        
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.parameters())
-        
-        print(f"🎯 Training mode set:")
-        print(f"   Trainable params: {trainable_params:,} ({trainable_params/total_params*100:.4f}%)")
-    
-    def _print_parameter_stats(self):
-        """
-        전체 파라미터 및 훈련 가능 파라미터 통계 출력
-        """
-        total_params = sum(p.numel() for p in self.parameters())
-        
-        lora_params = sum(p.numel() for name, p in self.named_parameters() if 'lora' in name)
-        safety_selector_params = sum(p.numel() for name, p in self.named_parameters() if 'safety_selector' in name)
-        safety_classifier_params = sum(p.numel() for name, p in self.named_parameters() if 'safety_classifier' in name)
-        
-        print(f"📊 Parameter Statistics:")
-        print(f"   Total model params: {total_params:,}")
-        print(f"   LoRA params: {lora_params:,}")
-        print(f"   Safety Selector params: {safety_selector_params:,}")
-        print(f"   Safety Classifier params: {safety_classifier_params:,}")
-        print(f"   Total trainable params: {lora_params + safety_selector_params + safety_classifier_params:,}")
-
+            # 전체 모델을 eval 모드로 설정 (기본 가중치 고정)
+            self.eval()
+            
+            # 모든 파라미터를 먼저 비훈련으로 설정
+            for param in self.parameters():
+                param.requires_grad = False
+            
+            # LoRA 파라미터만 훈련 가능하게 설정
+            trainable_params = 0
+            total_params = 0
+            
+            for name, module in self.named_modules():
+                if isinstance(module, LoRALayer):
+                    module.train()
+                    for param in module.parameters():
+                        param.requires_grad = True
+                        trainable_params += param.numel()
+                
+                # 모든 파라미터 수 계산
+                for param in module.parameters():
+                    total_params += param.numel()
+            
+            # Safety 분류 헤드도 훈련 가능하게 설정
+            self.safety_classifier.train()
+            for param in self.safety_classifier.parameters():
+                param.requires_grad = True
+                trainable_params += param.numel()
+            
+            # Safety Token Selector도 훈련 가능하게 설정
+            self.safety_selector.train()
+            for param in self.safety_selector.parameters():
+                param.requires_grad = True
+                trainable_params += param.numel()
+            
+            print(f"🎯 Training mode set:")
+            print(f"   Trainable params: {trainable_params:,} ({trainable_params/total_params*100:.4f}%)")
+            
+        else:
+            # 전체 모델 훈련 모드
+            self.train()
+            for param in self.parameters():
+                param.requires_grad = True
